@@ -1,17 +1,16 @@
 import os
+import base64
+import httpx
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import Response
-from openai import AsyncOpenAI
 
 app = FastAPI()
 
 TTS_SECRET = os.getenv("TTS_SECRET", "")
-# Replace edge-tts defaults with OpenAI defaults
-DEFAULT_VOICE = os.getenv("TTS_DEFAULT_VOICE", "nova")
+GOOGLE_TTS_API_KEY = os.getenv("GOOGLE_TTS_API_KEY", "")
 
-# Initialize OpenAI client
-# It will automatically use the OPENAI_API_KEY environment variable
-openai_client = AsyncOpenAI()
+# Replace OpenAI defaults with Google defaults
+DEFAULT_VOICE = os.getenv("TTS_DEFAULT_VOICE", "en-US-Standard-C")
 
 def _auth_ok(auth_header: str | None) -> bool:
     print(f"Checking auth. Provided Header: {auth_header!r}")
@@ -26,21 +25,30 @@ def _auth_ok(auth_header: str | None) -> bool:
 
 @app.get("/")
 def read_root():
-    return {"message": "Lux Enterprise TTS is live. Use /health to check status or POST /tts to generate audio."}
+    return {"message": "Lux Enterprise TTS (Google Cloud) is live. Use /health to check status or POST /tts to generate audio."}
 
 @app.get("/health")
 def health():
+    if not GOOGLE_TTS_API_KEY:
+        return {"ok": False, "error": "Missing GOOGLE_TTS_API_KEY"}
     return {"ok": True}
 
-# Map Edge-TTS names to OpenAI voices to preserve backward compatibility for frontend
+# Map previous system voices to Google Standard voices
 VOICE_MAP = {
-    "en-US-JennyNeural": "nova",
-    "en-US-AriaNeural": "nova",
-    "en-US-GuyNeural": "echo",
-    "en-US-DavisNeural": "onyx",
-    "en-US-BrandonNeural": "echo",
-    "en-US-TonyNeural": "alloy",
-    "en-US-MichelleNeural": "shimmer"
+    # Lana (Female)
+    "en-US-JennyNeural": "en-US-Standard-C",
+    "en-US-AriaNeural": "en-US-Standard-E",
+    
+    # Andre (Male)
+    "en-US-GuyNeural": "en-US-Standard-D",
+    "en-US-DavisNeural": "en-US-Standard-I",
+    
+    # Tyrone (Deeper male)
+    "en-US-BrandonNeural": "en-US-Standard-B",
+    
+    # Others
+    "en-US-TonyNeural": "en-US-Standard-A",
+    "en-US-MichelleNeural": "en-US-Standard-F"
 }
 
 @app.post("/tts")
@@ -57,28 +65,52 @@ async def tts(
 
     # Map the requested voice or fallback to default
     requested_voice = (payload.get("voice") or DEFAULT_VOICE).strip()
-    openai_voice = VOICE_MAP.get(requested_voice, "nova")
+    google_voice = VOICE_MAP.get(requested_voice, "en-US-Standard-C")
 
     # Keep it sane for voice notes
     if len(text) > 4000:
         text = text[:4000]
 
+    if not GOOGLE_TTS_API_KEY:
+        raise HTTPException(status_code=500, detail="Google TTS API Key not configured")
+
     try:
-        # Generate speech using OpenAI
-        response = await openai_client.audio.speech.create(
-            model="tts-1",
-            voice=openai_voice,
-            input=text,
-            response_format="opus" # opus is native OGG and exactly what we need
-        )
+        url = f"https://texttospeech.googleapis.com/v1/text:synthesize?key={GOOGLE_TTS_API_KEY}"
+        
+        # Check if text contains SSML tags for better formatting
+        is_ssml = text.startswith("<speak>") and text.endswith("</speak>")
+        input_payload = {"ssml": text} if is_ssml else {"text": text}
 
-        audio_data = response.read()
+        request_body = {
+            "input": input_payload,
+            "voice": {
+                "languageCode": "en-US",
+                "name": google_voice
+            },
+            "audioConfig": {
+                "audioEncoding": "OGG_OPUS"
+            }
+        }
 
-        return Response(
-            content=audio_data,
-            media_type="audio/ogg",
-            headers={"Content-Disposition": "attachment; filename=voice.ogg"}
-        )
+        async with httpx.AsyncClient() as client:
+            response = await client.post(url, json=request_body)
+            response.raise_for_status()
+            data = response.json()
+
+            if "audioContent" not in data:
+                raise Exception("audioContent not found in Google TTS response")
+
+            # Decode the base64 audio
+            audio_data = base64.b64decode(data["audioContent"])
+
+            return Response(
+                content=audio_data,
+                media_type="audio/ogg",
+                headers={"Content-Disposition": "attachment; filename=voice.ogg"}
+            )
+    except httpx.HTTPStatusError as e:
+        print(f"Google API Error: {e.response.text}")
+        raise HTTPException(status_code=500, detail=f"Google TTS API Error: {e.response.status_code}")
     except Exception as e:
-        print(f"TTS Error: {e}")
+        print(f"TTS Process Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
