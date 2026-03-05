@@ -11,11 +11,16 @@ DEFAULT_RATE  = os.getenv("TTS_DEFAULT_RATE", "+0%")
 DEFAULT_PITCH = os.getenv("TTS_DEFAULT_PITCH", "+0Hz")
 
 def _auth_ok(auth_header: str | None) -> bool:
+    print(f"Checking auth. Provided Header: {auth_header!r}")
     if not TTS_SECRET:
+        print("TTS_SECRET is empty!")
         return False
     if not auth_header:
+        print("Auth header is empty!")
         return False
-    return auth_header.strip() == f"Bearer {TTS_SECRET}"
+    expected = f"Bearer {TTS_SECRET}"
+    print(f"Expected: {expected!r}")
+    return auth_header.strip() == expected
 
 @app.get("/")
 def read_root():
