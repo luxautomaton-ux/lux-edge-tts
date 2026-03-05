@@ -17,6 +17,10 @@ def _auth_ok(auth_header: str | None) -> bool:
         return False
     return auth_header.strip() == f"Bearer {TTS_SECRET}"
 
+@app.get("/")
+def read_root():
+    return {"message": "Lux Edge TTS is live. Use /health to check status or POST /tts to generate audio."}
+
 @app.get("/health")
 def health():
     return {"ok": True}
