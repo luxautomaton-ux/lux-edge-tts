@@ -1,14 +1,17 @@
-import os, tempfile, subprocess, asyncio
+import os
 from fastapi import FastAPI, Header, HTTPException
-from fastapi.responses import FileResponse
-import edge_tts
+from fastapi.responses import Response
+from openai import AsyncOpenAI
 
 app = FastAPI()
 
 TTS_SECRET = os.getenv("TTS_SECRET", "")
-DEFAULT_VOICE = os.getenv("TTS_DEFAULT_VOICE", "en-US-JennyNeural")
-DEFAULT_RATE  = os.getenv("TTS_DEFAULT_RATE", "+0%")
-DEFAULT_PITCH = os.getenv("TTS_DEFAULT_PITCH", "+0Hz")
+# Replace edge-tts defaults with OpenAI defaults
+DEFAULT_VOICE = os.getenv("TTS_DEFAULT_VOICE", "nova")
+
+# Initialize OpenAI client
+# It will automatically use the OPENAI_API_KEY environment variable
+openai_client = AsyncOpenAI()
 
 def _auth_ok(auth_header: str | None) -> bool:
     print(f"Checking auth. Provided Header: {auth_header!r}")
@@ -19,16 +22,26 @@ def _auth_ok(auth_header: str | None) -> bool:
         print("Auth header is empty!")
         return False
     expected = f"Bearer {TTS_SECRET}"
-    print(f"Expected: {expected!r}")
     return auth_header.strip() == expected
 
 @app.get("/")
 def read_root():
-    return {"message": "Lux Edge TTS is live. Use /health to check status or POST /tts to generate audio."}
+    return {"message": "Lux Enterprise TTS is live. Use /health to check status or POST /tts to generate audio."}
 
 @app.get("/health")
 def health():
     return {"ok": True}
+
+# Map Edge-TTS names to OpenAI voices to preserve backward compatibility for frontend
+VOICE_MAP = {
+    "en-US-JennyNeural": "nova",
+    "en-US-AriaNeural": "nova",
+    "en-US-GuyNeural": "echo",
+    "en-US-DavisNeural": "onyx",
+    "en-US-BrandonNeural": "echo",
+    "en-US-TonyNeural": "alloy",
+    "en-US-MichelleNeural": "shimmer"
+}
 
 @app.post("/tts")
 async def tts(
@@ -42,38 +55,30 @@ async def tts(
     if not text:
         raise HTTPException(status_code=400, detail="missing text")
 
-    voice = (payload.get("voice") or DEFAULT_VOICE).strip()
-    rate  = (payload.get("rate") or DEFAULT_RATE).strip()
-    pitch = (payload.get("pitch") or DEFAULT_PITCH).strip()
+    # Map the requested voice or fallback to default
+    requested_voice = (payload.get("voice") or DEFAULT_VOICE).strip()
+    openai_voice = VOICE_MAP.get(requested_voice, "nova")
 
-    # Keep it sane for Telegram voice notes
+    # Keep it sane for voice notes
     if len(text) > 4000:
         text = text[:4000]
 
-    td = tempfile.mkdtemp()
-    mp3_path = os.path.join(td, "out.mp3")
-    ogg_path = os.path.join(td, "out.ogg")
-
     try:
-        communicate = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
-        await communicate.save(mp3_path)
+        # Generate speech using OpenAI
+        response = await openai_client.audio.speech.create(
+            model="tts-1",
+            voice=openai_voice,
+            input=text,
+            response_format="opus" # opus is native OGG and exactly what we need
+        )
 
-        # Convert to OGG/OPUS voice-note friendly format
-        subprocess.check_call([
-            "ffmpeg", "-y",
-            "-i", mp3_path,
-            "-c:a", "libopus",
-            "-b:a", "32k",
-            "-vbr", "on",
-            "-application", "voip",
-            "-ac", "1",
-            ogg_path
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        audio_data = response.read()
 
-        return FileResponse(
-            ogg_path,
+        return Response(
+            content=audio_data,
             media_type="audio/ogg",
-            filename="voice.ogg"
+            headers={"Content-Disposition": "attachment; filename=voice.ogg"}
         )
     except Exception as e:
+        print(f"TTS Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))

@@ -1,4 +1,4 @@
 fastapi==0.110.0
 uvicorn[standard]==0.27.1
-edge-tts==6.1.12
+openai>=1.14.0
 python-multipart==0.0.9
